@@ -1,91 +1,60 @@
-import logging
-import os
-import cv2
-import numpy as np
 import torch
-import torch.nn.functional as F
+import requests
+import numpy as np
+import cv2
+import albumentations as A
+import segmentation_models_pytorch as smp
 
-from unet import UNet
+def main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Load pretrained model and preprocessing function
+    checkpoint = "smp-hub/segformer-b5-640x640-ade-160k"
+    model = smp.from_pretrained(checkpoint).eval().to(device)
+    preprocessing = A.Compose.from_pretrained(checkpoint)
 
-def predict_img(net, full_img, device, scale_factor=1, out_threshold=0.5):
-    net.eval()
-    img = torch.from_numpy(BasicDataset.preprocess(None, full_img, scale_factor, is_mask=False))
-    img = img.unsqueeze(0)
-    img = img.to(device=device, dtype=torch.float32)
+    # Load image using OpenCV
+    url = "https://huggingface.co/datasets/hf-internal-testing/fixtures_ade20k/resolve/main/ADE_val_00000001.jpg"
+    response = requests.get(url, stream=True).raw
+    img_array = np.asarray(bytearray(response.read()), dtype=np.uint8)
+    image_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
+    # Convert BGR to RGB
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+    # Preprocess image
+    normalized_image = preprocessing(image=image_rgb)["image"]
+    input_tensor = torch.as_tensor(normalized_image).permute(2, 0, 1).unsqueeze(0).to(device)
+
+    # Perform inference
     with torch.no_grad():
-        output = net(img).cpu()
-        output = F.interpolate(output, (full_img.shape[0], full_img.shape[1]), mode='bilinear')
-        if net.n_classes > 1:
-            mask = output.argmax(dim=1)
-        else:
-            mask = torch.sigmoid(output) > out_threshold
+        output_mask = model(input_tensor)
 
-    return mask[0].long().squeeze().numpy()
+    # Postprocess mask
+    mask = torch.nn.functional.interpolate(
+        output_mask, size=(image_rgb.shape[0], image_rgb.shape[1]),
+        mode="bilinear", align_corners=False
+    )
+    mask = mask.argmax(1).squeeze().cpu().numpy()
 
+    # Convert back to BGR for visualization
+    output_image = image_bgr.copy()
 
-def mask_to_image(mask: np.ndarray, mask_values):
-    if isinstance(mask_values[0], list):
-        out = np.zeros((mask.shape[-2], mask.shape[-1], len(mask_values[0])), dtype=np.uint8)
-    elif mask_values == [0, 1]:
-        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=bool)
-    else:
-        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=np.uint8)
+    # Extract contours for each class
+    for class_id in np.unique(mask):
+        if class_id == 0:
+            continue  # often background, optional to skip
 
-    if mask.ndim == 3:
-        mask = np.argmax(mask, axis=0)
+        binary_mask = np.uint8(mask == class_id) * 255
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    for i, v in enumerate(mask_values):
-        out[mask == i] = v
+        color = tuple(np.random.randint(0, 255, 3).tolist())
+        cv2.drawContours(output_image, contours, -1, color, thickness=2)
 
-    return Image.fromarray(out)
+    # Show result
+    cv2.imshow("Contours on Original Image", output_image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-
-    # === Settings ===
-    model_path = '/Users/rytis/Desktop/cvdlink/semi supervised/unet_sample/unet_carvana_scale1.0_epoch2.pth'
-    input_image_path = 'input.jpg'
-    output_mask_path = 'output_mask.png'
-    out_threshold = 0.5
-    bilinear = False
-    n_classes = 2
-
-    # === Load model ===
-    net = UNet(n_channels=3, n_classes=n_classes, bilinear=bilinear)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # use CUDA if
-    net.to(device=device)
-    
-
-    logging.info(f'Loading model from {model_path}')
-    state_dict = torch.load(model_path, map_location=device)
-    mask_values = state_dict.pop('mask_values', [0, 1])
-    net.load_state_dict(state_dict)
-    logging.info('Model loaded!')
-
-    dummy_input = torch.randn(1, 3, 512, 512)  # [B, C, H, W]
-    output = net(dummy_input)
-    print(f"Output shape: {output.shape}")
-    # === Load image using OpenCV ===
-    logging.info(f'Loading image from {input_image_path}')
-    bgr_img = cv2.imread(input_image_path)
-    if bgr_img is None:
-        raise FileNotFoundError(f"Image not found at {input_image_path}")
-    rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-
-    # === Predict ===
-    mask = predict_img(net=net,
-                       full_img=rgb_img,
-                       scale_factor=scale_factor,
-                       out_threshold=out_threshold,
-                       device=device)
-
-    # === Save result ===
-    result_img = mask_to_image(mask, mask_values)
-    result_img.save(output_mask_path)
-    logging.info(f'Mask saved to {output_mask_path}')
-
-    # Optional: visualize
-    # plot_img_and_mask(Image.fromarray(rgb_img), mask)
+if __name__ == "__main__":
+    main()
