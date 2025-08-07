@@ -1,4 +1,4 @@
-# PyTorch Autoencoder Sample with NUCLIO
+# PyTorch Autoencoder Sample
 
 This repository provides a minimal example of using a Segformer model in PyTorch for image segmentation.
 
